@@ -1,0 +1,24 @@
+{
+  "name": "@vyiclaw/core",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0",
+    "strip-ansi": "^7.2.0",
+    "uuid": "^10.0.0",
+    "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.4.0"
+  }
+}

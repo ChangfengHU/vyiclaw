@@ -1,0 +1,15 @@
+{
+  "name": "vyiclaw",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev:web": "pnpm --filter @vyiclaw/web dev",
+    "vyiclaw": "node --import tsx/esm packages/cli/src/index.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "tsx": "^4.7.0"
+  }
+}
