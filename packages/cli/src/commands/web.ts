@@ -92,7 +92,7 @@ function startWebSocketServer(wsPort: number): void {
           }
         });
         // Run in background so WS stays open
-        termDebate.runDebate(msg.topic, msg.rounds ?? 3).catch((err) => {
+        termDebate.runDebate(msg.topic, msg.rounds ?? 3, msg.proRoleCtx, msg.conRoleCtx).catch((err) => {
           broadcast(wss, { type: "error", message: String(err), _source: "terminal_debate" });
         });
       } else if (msg.type === "abort_terminal_debate") {

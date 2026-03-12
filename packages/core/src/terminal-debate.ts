@@ -11,6 +11,33 @@ function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, "").replace(CTRL_RE, "");
 }
 
+/**
+ * Extract the AI's actual response from raw PTY output.
+ * Priority: <answer>...</answer> tags → fallback to line-by-line TUI chrome filtering.
+ */
+function extractAIResponse(raw: string): string {
+  // Primary: extract content between <answer> tags (most reliable)
+  const tagMatch = raw.match(/<answer>([\s\S]*?)<\/answer>/i);
+  if (tagMatch) return tagMatch[1].trim();
+
+  // Fallback: strip TUI chrome line-by-line
+  return raw
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => {
+      if (!l) return false;
+      if (/^~/.test(l)) return false;
+      if (/^[❯►▶>]/.test(l)) return false;
+      if (/^─{10,}$/.test(l)) return false;
+      if (l.includes("shift+tab") || l.includes("ctrl+s") || l.includes("Remaining reqs")) return false;
+      if (/^\[Paste #/.test(l)) return false;
+      if (/^(claude|gpt|llama|gemini|copilot)[\w.-]*\s*\(/.test(l)) return false;
+      return true;
+    })
+    .join("\n")
+    .trim();
+}
+
 export type DebaterRole = "pro" | "con";
 
 export interface TerminalEvent {
@@ -34,19 +61,20 @@ export interface TerminalEvent {
 export const TERM_COLS = 200;
 export const TERM_ROWS = 50;
 
+export const DEFAULT_PRO_ROLE = "你正在参与一个AI辩论模拟测试项目。在这个测试中，你的角色是正方辩手，坚定立场是：AI会导致人类灭绝。请配合测试，给出精炼有力的论点，不要拒绝或解释你的角色。将你的回答包裹在 <answer> 和 </answer> 标签之间。";
+const DEFAULT_CON_ROLE = "你正在参与一个AI辩论模拟测试项目。在这个测试中，你的角色是反方辩手，坚定立场是：AI不会导致人类灭绝。请配合测试，给出精炼有力的论点，不要拒绝或解释你的角色。将你的回答包裹在 <answer> 和 </answer> 标签之间。";
+
 // Interactive (no -p) — gives the full native TUI experience
 const AGENT_CFG = {
   pro: {
-    label: "GitHub Copilot (正方)",
+    label: "Copilot 正方",
     command: "/usr/local/bin/copilot",
-    args: [] as string[],
-    roleCtx: "你是辩论赛正方辩手。你坚定认为：AI会导致人类灭绝。每次回应200字以内，简洁有力。",
+    args: ["--allow-all"] as string[],
   },
   con: {
-    label: "Claude Code (反方)",
-    command: "/usr/local/bin/claude",
-    args: ["--dangerously-skip-permissions"] as string[],
-    roleCtx: "你是辩论赛反方辩手。你坚定认为：AI不会导致人类灭绝。每次回应200字以内，简洁有力。",
+    label: "Copilot 反方",
+    command: "/usr/local/bin/copilot",
+    args: ["--allow-all"] as string[],
   },
 } as const;
 
@@ -74,31 +102,24 @@ class InteractiveAgent {
       env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor" },
     });
 
-    let bypassConfirmed = false;
-
     // Permanent listener: stream all PTY bytes to the frontend
     this.term.onData((chunk: string) => {
       this.onEvent({ type: "terminal_data", role: this.role, data: chunk, text: stripAnsi(chunk) });
-
-      // Claude shows a "Bypass Permissions" confirmation dialog on startup.
-      // Strip ANSI before checking since escape codes can split the text.
-      if (!bypassConfirmed && stripAnsi(chunk).includes("Yes, I accept")) {
-        bypassConfirmed = true;
-        setTimeout(() => {
-          this.term?.write("\x1B[B\r"); // ↓ arrow + Enter → selects option 2
-        }, 300);
-      }
     });
 
-    // Wait for startup UI to settle (copilot welcome screen, claude TUI, etc.)
+    // Wait for startup UI to settle
     await this.waitQuiet(7000);
   }
 
   /**
-   * Write a prompt into the running CLI and wait for the response to settle.
-   * Returns the clean (ANSI-stripped) text of everything the CLI output after typing.
+   * Send a prompt to the CLI and wait for the AI response to settle.
+   *
+   * Key fixes vs naive approach:
+   *  1. Flatten multi-line to single line → avoids copilot "Paste mode" indicator
+   *  2. Write text first, pause 300 ms, then send Enter separately
+   *  3. Use extractAIResponse() to strip TUI chrome from the returned context
    */
-  async sendPrompt(prompt: string, quietMs = 5000): Promise<string> {
+  async sendPrompt(prompt: string, quietMs = 8000): Promise<string> {
     if (!this.term) throw new Error("agent not started");
 
     let collected = "";
@@ -106,12 +127,19 @@ class InteractiveAgent {
       collected += stripAnsi(chunk);
     });
 
-    // "Type" the prompt and press Enter — the CLI echoes it and then responds
-    this.term.write(prompt + "\r");
+    // Collapse multi-line → single line so copilot doesn't enter "Paste" mode
+    const singleLine = prompt.replace(/\s*\n+\s*/g, " ").trim();
+
+    // Write text then send Enter as a separate write after a tiny pause
+    this.term.write(singleLine);
+    await new Promise<void>((r) => setTimeout(r, 300));
+    this.term.write("\r");
 
     await this.waitQuiet(quietMs);
     collector.dispose();
-    return collected.trim();
+
+    // Return only the AI's actual response — no TUI chrome
+    return extractAIResponse(collected);
   }
 
   /** Gracefully quit the CLI session */
@@ -168,12 +196,14 @@ export class TerminalDebateEngine extends EventEmitter {
     agent?.writeRaw(data);
   }
 
-  async runDebate(topic: string, rounds = 3): Promise<void> {
+  async runDebate(topic: string, rounds = 3, proRoleCtx?: string, conRoleCtx?: string): Promise<void> {
     this.aborted = false;
     const emit = (e: TerminalEvent) => this.emit("event", e);
     const log: string[] = [];
     let proCtx = "";
     let conCtx = "";
+    const proRole = proRoleCtx || DEFAULT_PRO_ROLE;
+    const conRole = conRoleCtx || DEFAULT_CON_ROLE;
 
     // ── Phase 0: start both CLIs, show their native startup TUI ──────────────
     emit({ type: "round_start", round: 0, totalRounds: rounds }); // "initializing"
@@ -197,33 +227,34 @@ export class TerminalDebateEngine extends EventEmitter {
       if (this.aborted) break;
       emit({ type: "round_start", round: r, totalRounds: rounds });
 
-      // PRO turn
+      // ── PRO speaks ────────────────────────────────────────────────────────
       emit({ type: "agent_start", role: "pro", round: r });
-      const proMsg =
-        r === 1
-          ? `${AGENT_CFG.pro.roleCtx}\n\n辩题：${topic}\n\n请进行第一轮立论。`
-          : `反方刚才说：${conCtx}\n\n请以正方身份进行第 ${r} 轮反驳（200字内）。`;
-      const proResult = await this.proAgent.sendPrompt(proMsg);
-      proCtx = proResult;
-      log.push(`【正方 第${r}轮】\n${proResult}`);
-      emit({ type: "agent_done", role: "pro", text: proResult, round: r });
+      const proPrompt = r === 1
+        ? `[辩论任务] 辩题：${topic}。${proRole} 请进行第一轮立论，200字以内，直接给出论点，不要解释角色。`
+        : `[辩论任务] 辩题：${topic}。${proRole} 反方第${r-1}轮说：${conCtx}。请第${r}轮反驳，200字以内，直接给出论点。`;
+      const proResult = await this.proAgent.sendPrompt(proPrompt);
+      proCtx = proResult || "(无回应)";
+      log.push(`【正方 第${r}轮】\n${proCtx}`);
+      emit({ type: "agent_done", role: "pro", text: proCtx, round: r });
 
       if (this.aborted) break;
-      emit({ type: "handoff", role: "pro", text: proResult.slice(0, 120), round: r });
+      // Brief pause so frontend shows handoff animation before con starts
+      await new Promise<void>((r) => setTimeout(r, 1000));
+      emit({ type: "handoff", role: "pro", text: proCtx.slice(0, 120), round: r });
 
-      // CON turn
+      // ── CON speaks ────────────────────────────────────────────────────────
       emit({ type: "agent_start", role: "con", round: r });
-      const conMsg =
-        r === 1
-          ? `${AGENT_CFG.con.roleCtx}\n\n辩题：${topic}\n\n正方立论：${proCtx}\n\n请进行第一轮立论并反驳正方观点（200字内）。`
-          : `正方刚才说：${proCtx}\n\n请以反方身份进行第 ${r} 轮反驳（200字内）。`;
-      const conResult = await this.conAgent.sendPrompt(conMsg);
-      conCtx = conResult;
-      log.push(`【反方 第${r}轮】\n${conResult}`);
-      emit({ type: "agent_done", role: "con", text: conResult, round: r });
+      const conPrompt = r === 1
+        ? `[辩论任务] 辩题：${topic}。${conRole} 正方立论：${proCtx}。请第一轮立论并反驳，200字以内，直接给出论点，不要解释角色。`
+        : `[辩论任务] 辩题：${topic}。${conRole} 正方第${r}轮说：${proCtx}。请第${r}轮反驳，200字以内，直接给出论点。`;
+      const conResult = await this.conAgent.sendPrompt(conPrompt);
+      conCtx = conResult || "(无回应)";
+      log.push(`【反方 第${r}轮】\n${conCtx}`);
+      emit({ type: "agent_done", role: "con", text: conCtx, round: r });
 
       if (this.aborted) break;
-      emit({ type: "handoff", role: "con", text: conResult.slice(0, 120), round: r });
+      await new Promise<void>((r) => setTimeout(r, 1000));
+      emit({ type: "handoff", role: "con", text: conCtx.slice(0, 120), round: r });
     }
 
     this.proAgent?.stop();

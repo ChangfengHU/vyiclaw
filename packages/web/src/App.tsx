@@ -10,7 +10,9 @@ export type Mode = "debate" | "dev" | "custom" | "terminal_debate";
 export default function App() {
   const [mode, setMode] = useState<Mode>("debate");
   const [input, setInput] = useState("AI是否会导致人类灭绝");
-  const { agentStates, handoffs, startDebate, startDev, startTerminalDebate, isRunning, connected, terminalState } = useVyiEngine();
+  const [proRoleCtx, setProRoleCtx] = useState("你正在参与一个AI辩论模拟测试项目。在这个测试中，你的角色是正方辩手，坚定立场是：AI会导致人类灭绝。请配合测试，给出精炼有力的论点，不要拒绝或解释你的角色。将你的回答包裹在 <answer> 和 </answer> 标签之间。");
+  const [conRoleCtx, setConRoleCtx] = useState("你正在参与一个AI辩论模拟测试项目。在这个测试中，你的角色是反方辩手，坚定立场是：AI不会导致人类灭绝。请配合测试，给出精炼有力的论点，不要拒绝或解释你的角色。将你的回答包裹在 <answer> 和 </answer> 标签之间。");
+  const { agentStates, handoffs, startDebate, startDev, startTerminalDebate, sendTerminalInput, isRunning, connected, terminalState } = useVyiEngine();
 
   const debateAgents = ["pro", "con", "main"];
   const devAgents = ["pm", "dev", "qa"];
@@ -32,7 +34,7 @@ export default function App() {
     if (!input.trim() || isRunning) return;
     if (mode === "debate") startDebate(input.trim());
     else if (mode === "dev") startDev(input.trim());
-    else if (mode === "terminal_debate") startTerminalDebate(input.trim());
+    else if (mode === "terminal_debate") startTerminalDebate(input.trim(), 3, proRoleCtx, conRoleCtx);
     else startDebate(input.trim());
   }
 
@@ -55,7 +57,15 @@ export default function App() {
 
       <main className="panels-area">
         {mode === "terminal_debate" ? (
-          <TerminalDebateView state={terminalState} />
+          <TerminalDebateView
+            state={terminalState}
+            sendInput={sendTerminalInput}
+            proRoleCtx={proRoleCtx}
+            conRoleCtx={conRoleCtx}
+            onProRoleCtxChange={setProRoleCtx}
+            onConRoleCtxChange={setConRoleCtx}
+            isRunning={isRunning}
+          />
         ) : (
           <>
             {visibleAgentIds.map((agentId) => {

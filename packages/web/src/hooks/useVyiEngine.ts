@@ -30,6 +30,13 @@ export interface TerminalAgentState {
   transcript: string;
 }
 
+export interface DebateEntry {
+  round: number;
+  role: "pro" | "con";
+  label: string;
+  text: string;
+}
+
 export interface TerminalDebateState {
   pro: TerminalAgentState;
   con: TerminalAgentState;
@@ -37,6 +44,7 @@ export interface TerminalDebateState {
   totalRounds: number;
   summary: string;
   running: boolean;
+  debateLog: DebateEntry[];
 }
 
 interface EngineEvent {
@@ -86,6 +94,7 @@ function makeTerminalState(): TerminalDebateState {
     totalRounds: 3,
     summary: "",
     running: false,
+    debateLog: [],
   };
 }
 
@@ -178,6 +187,17 @@ export function useVyiEngine() {
           }));
         } else if (type === "agent_done" && event.role) {
           updateTerminalAgent(event.role, (p) => ({ ...p, status: "done" }));
+          // Append clean text to live debate log if we got actual content
+          if (event.text && event.round && event.round > 0) {
+            const label = event.role === "pro" ? "✅ 正方" : "🔴 反方";
+            setTerminalState((prev) => ({
+              ...prev,
+              debateLog: [
+                ...prev.debateLog,
+                { round: event.round!, role: event.role!, label, text: event.text! },
+              ],
+            }));
+          }
         } else if (type === "debate_complete") {
           setTerminalState((prev) => ({
             ...prev,
@@ -297,12 +317,12 @@ export function useVyiEngine() {
     ws.send(JSON.stringify({ type: "start_dev", task }));
   }, []);
 
-  const startTerminalDebate = useCallback((topic: string, rounds = 3) => {
+  const startTerminalDebate = useCallback((topic: string, rounds = 3, proRoleCtx?: string, conRoleCtx?: string) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     setTerminalState(makeTerminalState());
     setIsRunning(true);
-    ws.send(JSON.stringify({ type: "start_terminal_debate", topic, rounds }));
+    ws.send(JSON.stringify({ type: "start_terminal_debate", topic, rounds, proRoleCtx, conRoleCtx }));
   }, []);
 
   /** Send raw user keystrokes into a CLI PTY (for manual intervention) */
